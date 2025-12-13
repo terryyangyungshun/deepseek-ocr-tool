@@ -1,0 +1,14 @@
+transformers==4.46.3
+tokenizers==0.20.3
+PyMuPDF
+img2pdf
+einops
+easydict
+addict 
+Pillow
+numpy
+fastapi>=0.110.0
+uvicorn>=0.30.0
+python-dotenv>=1.0.1
+aiofiles>=24.1.0
+requests>=2.32.3
