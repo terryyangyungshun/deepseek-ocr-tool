@@ -260,7 +260,7 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
             # 統一的上傳檔案預覽框（圖片、PDF、其他檔案都在這裡顯示）
             uploaded_preview = gr.HTML(
                 label="檔案預覽",
-                value="<div style='padding:20px;text-align:center;color:#999;'>📁 尚未上傳檔案</div>"
+                value=""  # 預設不顯示
             )
             
             prompt_input = gr.Dropdown(

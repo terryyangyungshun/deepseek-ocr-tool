@@ -188,6 +188,7 @@ async def preview_file(path: str):
 
 
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 if __name__ == "__main__":
