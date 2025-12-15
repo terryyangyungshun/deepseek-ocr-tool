@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi import Query
+from typing import Optional
+import json
 
 from file_manager import save_uploaded_file
 from inference_runner import run_ocr_task, read_task_state
@@ -34,35 +36,39 @@ async def send_progress(websocket: WebSocket, task_id: str, percent: int):
     """WebSocket 即時進度"""
     try:
         await websocket.send_json({"task_id": task_id, "progress": percent})
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"❌ WebSocket 發送失敗: {e}")
+        # 移除無效連線
+        if task_id in active_connections:
+            del active_connections[task_id]
 
 
 @app.get("/api/folder")
-
 async def get_folder_structure(path: str = Query(..., description="結果資料夾路徑")):
     """遞迴回傳資料夾結構（包含二級資料夾）"""
     base_path = Path(path)
     if not base_path.exists() or not base_path.is_dir():
         return {"status": "error", "message": f"路徑無效: {path}"}
 
-
     def build_tree(directory: Path):
         items = []
-        for entry in sorted(directory.iterdir(), key=lambda e: (e.is_file(), e.name.lower())):
-            if entry.is_dir():
-                items.append({
-                    "name": entry.name,
-                    "type": "folder",
-                    "path": str(entry),
-                    "children": build_tree(entry)
-                })
-            else:
-                items.append({
-                    "name": entry.name,
-                    "type": "file",
-                    "path": str(entry)
-                })
+        try:
+            for entry in sorted(directory.iterdir(), key=lambda e: (e.is_file(), e.name.lower())):
+                if entry.is_dir():
+                    items.append({
+                        "name": entry.name,
+                        "type": "folder",
+                        "path": str(entry),
+                        "children": build_tree(entry)
+                    })
+                else:
+                    items.append({
+                        "name": entry.name,
+                        "type": "file",
+                        "path": str(entry)
+                    })
+        except PermissionError:
+            pass  # 跳過無權限的資料夾
         return items
 
     return {
@@ -70,6 +76,7 @@ async def get_folder_structure(path: str = Query(..., description="結果資料�
         "path": str(base_path),
         "children": build_tree(base_path)
     }
+
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -79,7 +86,6 @@ async def upload_file(file: UploadFile = File(...)):
         return {"status": "success", "file_path": file_path, "file_type": file_type}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 
 @app.post("/api/start")
@@ -92,18 +98,33 @@ async def start_ocr_task(payload: dict, background_tasks: BackgroundTasks):
 
     task_id = str(uuid.uuid4())[:8]
 
-
     async def background_task():
         def on_progress(p):
             if task_id in active_connections:
                 ws = active_connections[task_id]
-                asyncio.create_task(send_progress(ws, task_id, p))
+                try:
+                    # 使用 asyncio 在事件循環中發送
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(send_progress(ws, task_id, p))
+                except Exception as e:
+                    print(f"❌ 進度發送錯誤: {e}")
 
-        result = run_ocr_task(input_path=file_path, task_id=task_id, on_progress=on_progress, prompt=prompt)
+        # 在背景執行 OCR 任務
+        result = await asyncio.to_thread(
+            run_ocr_task, 
+            input_path=file_path, 
+            task_id=task_id, 
+            on_progress=on_progress, 
+            prompt=prompt
+        )
 
+        # 發送完成訊息
         if task_id in active_connections:
             ws = active_connections[task_id]
-            asyncio.create_task(ws.send_json(result))
+            try:
+                await ws.send_json(result)
+            except Exception as e:
+                print(f"❌ 完成訊息發送失敗: {e}")
 
     background_tasks.add_task(background_task)
     return {"status": "running", "task_id": task_id}
@@ -117,10 +138,18 @@ async def websocket_progress(websocket: WebSocket, task_id: str):
     print(f"🌐 WebSocket 已連線: {task_id}")
     try:
         while True:
-            await asyncio.sleep(1)
+            # 保持連線活躍
+            data = await websocket.receive_text()
+            # 如果收到 ping，回應 pong
+            if data == "ping":
+                await websocket.send_text("pong")
     except WebSocketDisconnect:
-        print(f"❌ WebSocket 斷線: {task_id}")
-        del active_connections[task_id]
+        print(f"❌ WebSocket 正常斷線: {task_id}")
+    except Exception as e:
+        print(f"❌ WebSocket 異常: {task_id} - {e}")
+    finally:
+        if task_id in active_connections:
+            del active_connections[task_id]
 
 
 @app.get("/api/result/{task_id}")
@@ -132,7 +161,7 @@ async def get_result_files(task_id: str):
 
     status = state.get("status", "unknown")
     if status == "running":
-        return {"status": "running", "task_id": task_id}
+        return {"status": "running", "task_id": task_id, "progress": state.get("progress", 0)}
     if status == "error":
         return {"status": "error", "message": state.get("message", "未知錯誤")}
     if status != "finished":
@@ -156,6 +185,7 @@ async def get_result_files(task_id: str):
         "files": files,
     }
     
+
 @app.get("/api/progress/{task_id}")
 async def get_task_progress(task_id: str):
     """查詢任務即時進度"""
@@ -173,6 +203,7 @@ async def get_task_progress(task_id: str):
         "progress": progress
     }
 
+
 @app.get("/api/file/content")
 async def preview_file(path: str):
     """檔案預覽"""
@@ -180,17 +211,21 @@ async def preview_file(path: str):
     if not file_path.exists():
         return {"status": "error", "message": "檔案不存在"}
 
-    if file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
+    if file_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".gif", ".bmp"]:
         return FileResponse(file_path)
     else:
-        content = file_path.read_text(encoding="utf-8", errors="ignore")
-        return JSONResponse({"content": content})
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            return JSONResponse({"content": content})
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": f"讀取失敗: {str(e)}"})
 
 
+# 靜態檔案服務 - 注意順序很重要
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host="localhost", port=8002)

@@ -28,7 +28,7 @@ def upload_file_to_api(file_path):
     try:
         with open(file_path, "rb") as f:
             files = {"file": (Path(file_path).name, f)}
-            response = requests.post(f"{API_BASE_URL}/api/upload", files=files)
+            response = requests.post(f"{API_BASE_URL}/api/upload", files=files, timeout=30)
             return response.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -38,7 +38,7 @@ def start_ocr_task_api(file_path, prompt):
     """啟動 OCR 任務"""
     try:
         payload = {"file_path": file_path, "prompt": prompt}
-        response = requests.post(f"{API_BASE_URL}/api/start", json=payload)
+        response = requests.post(f"{API_BASE_URL}/api/start", json=payload, timeout=30)
         return response.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -48,27 +48,31 @@ async def monitor_progress_via_websocket(task_id, progress_callback):
     """透過 WebSocket 監聽任務進度"""
     try:
         uri = f"{WS_BASE_URL}/ws/progress/{task_id}"
-        async with websockets.connect(uri) as websocket:
+        async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
             while True:
-                message = await websocket.recv()
-                data = json.loads(message)
-                
-                # 如果收到進度更新
-                if "progress" in data:
-                    progress_callback(data["progress"])
-                
-                # 如果收到完成訊息
-                if data.get("status") == "finished" or data.get("status") == "error":
-                    return data
+                try:
+                    message = await asyncio.wait_for(websocket.recv(), timeout=60)
+                    data = json.loads(message)
+                    
+                    # 如果收到進度更新
+                    if "progress" in data:
+                        progress_callback(data["progress"])
+                    
+                    # 如果收到完成訊息
+                    if data.get("status") == "finished" or data.get("status") == "error":
+                        return data
+                except asyncio.TimeoutError:
+                    # 發送 ping 保持連線
+                    await websocket.send("ping")
     except Exception as e:
-        print(f"WebSocket 錯誤: {e}")
+        print(f"❌ WebSocket 錯誤: {e}")
         return None
 
 
 def get_task_progress_api(task_id):
     """查詢任務進度（備用方案）"""
     try:
-        response = requests.get(f"{API_BASE_URL}/api/progress/{task_id}")
+        response = requests.get(f"{API_BASE_URL}/api/progress/{task_id}", timeout=10)
         return response.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -77,7 +81,7 @@ def get_task_progress_api(task_id):
 def get_result_files_api(task_id):
     """取得結果檔案列表"""
     try:
-        response = requests.get(f"{API_BASE_URL}/api/result/{task_id}")
+        response = requests.get(f"{API_BASE_URL}/api/result/{task_id}", timeout=10)
         return response.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -86,7 +90,7 @@ def get_result_files_api(task_id):
 def get_folder_structure_api(folder_path):
     """取得資料夾結構"""
     try:
-        response = requests.get(f"{API_BASE_URL}/api/folder", params={"path": folder_path})
+        response = requests.get(f"{API_BASE_URL}/api/folder", params={"path": folder_path}, timeout=10)
         return response.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -95,7 +99,7 @@ def get_folder_structure_api(folder_path):
 def preview_file_api(file_path):
     """預覽檔案內容"""
     try:
-        response = requests.get(f"{API_BASE_URL}/api/file/content", params={"path": file_path})
+        response = requests.get(f"{API_BASE_URL}/api/file/content", params={"path": file_path}, timeout=10)
         if response.headers.get("content-type", "").startswith("image"):
             return response.content
         else:
@@ -126,10 +130,14 @@ def process_ocr(file, prompt, progress=gr.Progress()):
     task_id = start_result["task_id"]
     
     # 定義進度回調函式
+    last_progress = [0]  # 使用列表來保存可變值
     def update_progress(percent):
-        progress(percent / 100, desc=f"⚙️ 處理中... {percent}%")
+        if percent > last_progress[0]:  # 只更新增加的進度
+            last_progress[0] = percent
+            progress(percent / 100, desc=f"⚙️ 處理中... {percent}%")
     
     # 嘗試使用 WebSocket 監聽進度
+    use_polling = False
     try:
         result = asyncio.run(monitor_progress_via_websocket(task_id, update_progress))
         
@@ -137,25 +145,36 @@ def process_ocr(file, prompt, progress=gr.Progress()):
         if result and result.get("status") == "finished":
             pass  # 繼續處理結果
         elif result and result.get("status") == "error":
-            return f"❌ 任務執行失敗", "", None, ""
+            return f"❌ 任務執行失敗: {result.get('message', '未知錯誤')}", "", None, ""
         else:
             # WebSocket 失敗，回退到輪詢方式
-            raise Exception("WebSocket 連線失敗，使用輪詢方式")
-    
+            use_polling = True
     except Exception as e:
-        print(f"使用輪詢方式: {e}")
-        # 輪詢任務進度（備用方案）
-        while True:
+        print(f"⚠️ 使用輪詢方式: {e}")
+        use_polling = True
+    
+    # 輪詢任務進度（備用方案）
+    if use_polling:
+        max_retries = 300  # 最多等待 5 分鐘
+        retry_count = 0
+        
+        while retry_count < max_retries:
             time.sleep(1)
+            retry_count += 1
+            
             progress_result = get_task_progress_api(task_id)
             
             if progress_result.get("status") != "success":
+                if retry_count < 3:  # 前 3 次重試
+                    continue
                 return f"❌ 查詢進度失敗: {progress_result.get('message')}", "", None, ""
             
             state = progress_result.get("state", "unknown")
             current_progress = int(progress_result.get("progress", 0))
             
-            progress(current_progress / 100, desc=f"⚙️ 處理中... {current_progress}%")
+            if current_progress > last_progress[0]:
+                last_progress[0] = current_progress
+                progress(current_progress / 100, desc=f"⚙️ 處理中... {current_progress}%")
             
             if state == "finished":
                 break
@@ -163,6 +182,7 @@ def process_ocr(file, prompt, progress=gr.Progress()):
                 return f"❌ 任務執行失敗", "", None, ""
     
     # 取得結果檔案
+    progress(0.95, desc="📥 取得結果...")
     result = get_result_files_api(task_id)
     
     if result.get("status") != "success":
@@ -173,6 +193,7 @@ def process_ocr(file, prompt, progress=gr.Progress()):
     
     file_list = "\n".join([f"📄 {f}" for f in files]) if files else "無結果檔案"
     
+    progress(1.0, desc="✅ 完成！")
     return f"✅ 任務完成！\n任務 ID: {task_id}", file_list, result_dir, ""
 
 
@@ -215,11 +236,15 @@ def preview_uploaded_file(file):
     # 如果是圖片，直接顯示（用 base64 內嵌）
     if file_type in ["png", "jpg", "jpeg"] or str(file_path).lower().endswith((".png", ".jpg", ".jpeg")):
         import base64
-        with open(file.name, "rb") as img_f:
-            img_bytes = img_f.read()
-            img_b64 = base64.b64encode(img_bytes).decode()
-        ext = Path(file.name).suffix.lower().replace('.', '')
-        return f'<div style="text-align:center;"><img src="data:image/{ext};base64,{img_b64}" style="max-width:100%;max-height:400px;border:1px solid #ddd;border-radius:4px;" /></div>'
+        try:
+            with open(file.name, "rb") as img_f:
+                img_bytes = img_f.read()
+                img_b64 = base64.b64encode(img_bytes).decode()
+            ext = Path(file.name).suffix.lower().replace('.', '')
+            return f'<div style="text-align:center;"><img src="data:image/{ext};base64,{img_b64}" style="max-width:100%;max-height:400px;border:1px solid #ddd;border-radius:4px;" /></div>'
+        except Exception as e:
+            return f"<div style='padding:20px;color:red;'>❌ 圖片載入失敗: {str(e)}</div>"
+    
     # 如果是 PDF，顯示可滾動預覽（iframe）
     elif file_type == "pdf" or str(file_path).lower().endswith(".pdf"):
         # 產生 /uploads/xxx.pdf 路徑（上傳的檔案在 uploads 資料夾）
@@ -233,15 +258,43 @@ def preview_uploaded_file(file):
 def preview_file(file_path):
     """預覽選定的檔案"""
     if not file_path or not Path(file_path).exists():
-        return None, "❌ 檔案路徑無效"
+        return "<div style='padding:20px;color:red;'>❌ 檔案路徑無效</div>"
     
     file_path_obj = Path(file_path)
     
+    # 如果是圖片，轉為 base64 內嵌
     if file_path_obj.suffix.lower() in [".png", ".jpg", ".jpeg"]:
-        return str(file_path), ""
+        import base64
+        try:
+            with open(file_path, "rb") as img_f:
+                img_bytes = img_f.read()
+                img_b64 = base64.b64encode(img_bytes).decode()
+            ext = file_path_obj.suffix.lower().replace('.', '')
+            return f'<div style="text-align:center;"><img src="data:image/{ext};base64,{img_b64}" style="max-width:100%;max-height:600px;border:1px solid #ddd;border-radius:4px;" /></div>'
+        except Exception as e:
+            return f"<div style='padding:20px;color:red;'>❌ 圖片載入失敗: {str(e)}</div>"
+    
+    # 如果是 PDF，顯示 iframe
+    elif file_path_obj.suffix.lower() == ".pdf":
+        # 找出相對於 RESULTS_DIR 的路徑
+        try:
+            rel_path = file_path_obj.relative_to(RESULTS_DIR)
+            url = f"{API_BASE_URL}/results/{rel_path.as_posix()}"
+        except ValueError:
+            # 如果不在 results 資料夾，可能在 uploads
+            pdf_name = file_path_obj.name
+            url = f"{API_BASE_URL}/uploads/{pdf_name}"
+        
+        return f'<iframe src="{url}" width="100%" height="600px" style="border:1px solid #888;border-radius:4px;">您的瀏覽器不支援 PDF 預覽</iframe>'
+    
+    # 其他文字檔案
     else:
         content = preview_file_api(file_path)
-        return None, content
+        if isinstance(content, str) and content.startswith("錯誤"):
+            return f"<div style='padding:20px;color:red;'>{content}</div>"
+        # 使用 pre 標籤保持格式，設定深色文字
+        escaped_content = str(content).replace('<', '&lt;').replace('>', '&gt;')
+        return f'<pre style="padding:15px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;max-height:600px;overflow:auto;font-family:monospace;white-space:pre-wrap;color:#333;">{escaped_content}</pre>'
 
 
 # 建立 Gradio 介面
@@ -307,10 +360,11 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         preview_btn = gr.Button("👁️ 預覽", scale=1)
     
     with gr.Row():
-        with gr.Column(scale=1):
-            image_preview = gr.Image(label="圖片預覽", type="filepath")
-        with gr.Column(scale=1):
-            text_preview = gr.Textbox(label="文字預覽", lines=20)
+        # 統一的預覽框（支援圖片、文字、PDF）
+        unified_preview = gr.HTML(
+            label="檔案預覽",
+            value="<div style='padding:20px;text-align:center;color:#999;'>請輸入檔案路徑並點擊預覽按鈕</div>"
+        )
     
     # 事件綁定
     # 上傳檔案時自動預覽
@@ -339,10 +393,9 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     preview_btn.click(
         fn=preview_file,
         inputs=[preview_path_input],
-        outputs=[image_preview, text_preview]
+        outputs=[unified_preview]
     )
     
-    # 當結果資料夾更新時自動重新整理
     folder_path_input.change(
         fn=load_folder_structure,
         inputs=[folder_path_input],
