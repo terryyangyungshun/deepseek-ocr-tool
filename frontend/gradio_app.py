@@ -16,7 +16,7 @@ import requests
 import time
 from config_loader import RESULTS_DIR
 
-API_BASE_URL = "http://localhost:8002"
+API_BASE_URL = "http://localhost:8003"  # FastAPI 後端的 URL
 
 # 新增一個全域集合，儲存目前已展開的資料夾路徑
 EXPANDED_FOLDERS = set()
@@ -283,37 +283,27 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     # 注入 CSS，使文件瀏覽的 Radio 選項垂直排列、每項佔一列，並修正文字與選取色彩對比
     gr.HTML("""
     <style>
-    /* 容器限制：超過高度出現滾動 */
+    /* 容器限制：固定高度並出現滾動，避免展開時整個 block 增高 */
     #folder_tree {
-        max-height: 300px; /* 調整為 300px */
-        overflow-y: auto;
+        max-height: 220px !important;
+        height: 220px !important;
+        overflow-y: auto !important;
         padding: 6px;
         border-radius: 6px;
         margin-top: 8px;
+        box-sizing: border-box;
     }
 
-    /* 使上方 row 的左右欄等高，並可將左欄按鈕推到底部 */
-    /* 更可靠的選取器：直接針對 top_row 本身與其第一層子元素 */
+    /* 使上方 row 的左右欄等高，移除固定高度 */
     #top_row {
         display: flex !important;
         gap: 20px;
-        align-items: stretch;
-        min-height: 480px; /* 確保左右欄有一致高度 */
+        align-items: flex-start; /* 改為頂端對齊 */
     }
     #top_row > div {
         display: flex !important;
         flex-direction: column !important;
         flex: 1 1 0 !important;
-    }
-
-    /* 將開始解析按鈕推到左欄底部 */
-    #start_btn {
-        margin-top: auto !important;
-    }
-
-    /* 將文件瀏覽區推到右欄底部，使兩側底端對齊 */
-    #folder_tree {
-        margin-top: auto !important;
     }
 
     /* 深色主題：標籤為深色背景、淺色文字 */
@@ -325,9 +315,12 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         border: 1px solid rgba(255,255,255,0.06);
         border-radius: 6px;
         cursor: pointer;
-        background: #1f2937 !important; /* 暗色背景 */
-        color: #f5f7fa !important; /* 淺色文字 */
+        background: #1f2937 !important;
+        color: #f5f7fa !important;
         user-select: text;
+        overflow: hidden;               /* 防止換行導致高度增長 */
+        white-space: nowrap;            /* 單行並省略超出內容 */
+        text-overflow: ellipsis;
     }
 
     /* 確保內部所有文字元素都為淺色 */
@@ -338,6 +331,7 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     #folder_tree input[type="radio"] {
         margin-right: 8px;
         accent-color: #60a5fa;
+        flex: 0 0 auto;
     }
 
     /* 被勾選時加強對比（稍亮的深色） */
@@ -365,11 +359,10 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     #folder_tree::-webkit-scrollbar-track { background: transparent; }
     #folder_tree::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 6px; }
 
-    /* 小螢幕時保持適應 */
+    /* 小螢幕時保持適應：允許較小字體但仍維持固定高度 */
     @media (max-width: 600px) {
         #folder_tree label { font-size: 14px; padding: 10px; }
-        #folder_tree { max-height: 260px; }
-        #top_row { min-height: 360px; }
+        #folder_tree { max-height: 180px !important; height: 180px !important; }
     }
     </style>
     """)
@@ -388,57 +381,52 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
                 value=""  # 預設不顯示
             )
             
-            prompt_input = gr.Dropdown(
-                label="提示詞選擇",
-                choices=[
-                    "<image>\n<|grounding|>Convert the document to markdown.",
-                    "<image>\nOCR this image.",
-                    "<image>\nFree OCR.",
-                    "<image>\nParse the figure.",
-                    "<image>\nDescribe this image in detail."
-                ],
-                value="<image>\n<|grounding|>Convert the document to markdown.",
-                interactive=True
-            )
+            # 將提示詞選擇與執行狀態移到左側，提示詞在左、執行狀態在右
+            gr.Markdown("### 📊 任務狀態")
+            with gr.Row():
+               
+                prompt_input = gr.Dropdown(
+                    label="提示詞選擇",
+                    choices=[
+                        "<image>\n<|grounding|>Convert the document to markdown.",
+                        "<image>\nOCR this image.",
+                        "<image>\nFree OCR.",
+                        "<image>\nParse the figure.",
+                        "<image>\nDescribe this image in detail."
+                    ],
+                    value="<image>\n<|grounding|>Convert the document to markdown.",
+                    interactive=True
+                )
+                status_output = gr.Textbox(label="執行狀態", lines=3)
+
             submit_btn = gr.Button("🚀 開始解析", variant="primary", elem_id="start_btn")
             
         with gr.Column(scale=1, elem_id="right_col"):
-            gr.Markdown("### 📊 任務狀態")
-            status_output = gr.Textbox(label="執行狀態", lines=3)
+            gr.Markdown("### 📂 檔案瀏覽")
+            # 右側：單一 row，左右兩欄平均分配高度
+            with gr.Row(equal_height=True):  # 加入 equal_height 參數
+                with gr.Column(scale=1):  # 左側：路徑輸入與重新整理
+                    folder_path_input = gr.Textbox(
+                        label="瀏覽資料夾路徑",
+                        value=str(RESULTS_DIR),
+                        placeholder="輸入資料夾路徑..."
+                    )
+                    refresh_btn = gr.Button("🔄 重新整理")
+                with gr.Column(scale=1):  # 右側：文件瀏覽
+                    folder_tree_output = gr.Radio(
+                        label="文件瀏覽",
+                        choices=[],
+                        interactive=True,
+                        type="value",
+                        elem_id="folder_tree"
+                    )
 
-            gr.Markdown("### 📂 檔案瀏覽器")
-            folder_path_input = gr.Textbox(
-                label="瀏覽資料夾路徑",
-                value=str(RESULTS_DIR),
-                placeholder="輸入資料夾路徑..."
+            # 統一的檔案預覽區（直接放在文件瀏覽下方，移除手動輸入路徑功能）
+            unified_preview = gr.HTML(
+                label="檔案預覽",
+                value="<div style='padding:20px;text-align:center;color:#999;'>請從文件瀏覽選擇檔案進行預覽</div>"
             )
-            refresh_btn = gr.Button("🔄 重新整理")
-            folder_tree_output = gr.Radio(
-                label="文件瀏覽",
-                choices=[],
-                interactive=True,
-                type="value",
-                elem_id="folder_tree"
-            )
-    
-    with gr.Row():
-        gr.Markdown("### 👁️ 檔案預覽")
-    
-    with gr.Row():
-        preview_path_input = gr.Textbox(
-            label="檔案路徑",
-            placeholder="輸入完整檔案路徑進行預覽...",
-            scale=4
-        )
-        preview_btn = gr.Button("👁️ 預覽", scale=1)
-    
-    with gr.Row():
-        # 統一的預覽框（支援圖片、文字、PDF）
-        unified_preview = gr.HTML(
-            label="檔案預覽",
-            value="<div style='padding:20px;text-align:center;color:#999;'>請輸入檔案路徑並點擊預覽按鈕</div>"
-        )
-    
+
     # 事件綁定
     # 上傳檔案時自動預覽
     file_input.change(
@@ -463,19 +451,13 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         outputs=[folder_tree_output]
     )
     
-    # 當選擇檔案或資料夾時,自動填入路徑並預覽/展開
+    # 當選擇檔案或資料夾時,自動預覽（移除 preview_path_input，僅更新 unified_preview 與 folder_tree）
     folder_tree_output.change(
-        fn=handle_file_selection,
+        fn=lambda selected_path, current_root_folder: handle_file_selection(selected_path, current_root_folder)[1:],
         inputs=[folder_tree_output, folder_path_input],
-        outputs=[preview_path_input, unified_preview, folder_tree_output]
+        outputs=[unified_preview, folder_tree_output]
     )
-    
-    preview_btn.click(
-        fn=preview_file,
-        inputs=[preview_path_input],
-        outputs=[unified_preview]
-    )
-    
+
     folder_path_input.change(
         fn=load_folder_structure,
         inputs=[folder_path_input],
