@@ -18,6 +18,9 @@ from config_loader import RESULTS_DIR
 
 API_BASE_URL = "http://localhost:8002"
 
+# 新增一個全域集合，儲存目前已展開的資料夾路徑
+EXPANDED_FOLDERS = set()
+
 
 def upload_file_to_api(file_path):
     """上傳檔案到 FastAPI 後端"""
@@ -131,54 +134,68 @@ def process_ocr(file, prompt):
 
 
 def load_folder_structure(folder_path):
-    """載入資料夾結構,返回可點擊的檔案列表"""
+    """載入資料夾結構，回傳 Radio 可用的 choices（支援展開/摺疊）"""
     if not folder_path or not Path(folder_path).exists():
         return gr.update(choices=[], value=None)
-    
+
     result = get_folder_structure_api(folder_path)
-    
     if result.get("status") != "success":
         return gr.update(choices=[], value=None)
-    
-    def collect_items(items, parent_path=""):
-        """收集所有檔案和資料夾的路徑"""
+
+    def collect_items(items, indent=0):
         item_list = []
         for item in items:
+            # 使用全形空格作為縮排，能在元件中保留寬度感
+            indent_prefix = '\u3000' * indent
             if item["type"] == "folder":
-                # 資料夾顯示為 📁 開頭
-                display_name = f"📁 {item['name']}"
-                item_list.append((display_name, item['path']))
-                # 遞迴加入子項目
-                if 'children' in item:
-                    item_list.extend(collect_items(item['children'], item['path']))
+                # 根據是否已展開選擇圖示與是否顯示子項
+                if item['path'] in EXPANDED_FOLDERS:
+                    display_name = f"{indent_prefix}📁 ▼ {item['name']}"
+                    item_list.append((display_name, item['path']))
+                    if 'children' in item and item['children']:
+                        item_list.extend(collect_items(item['children'], indent + 1))
+                else:
+                    display_name = f"{indent_prefix}📁 ▶ {item['name']}"
+                    item_list.append((display_name, item['path']))
             else:
-                # 檔案顯示為 📄 開頭
-                display_name = f"📄 {item['name']}"
+                display_name = f"{indent_prefix}📄 {item['name']}"
                 item_list.append((display_name, item['path']))
         return item_list
-    
+
     items = collect_items(result.get("children", []))
-    
     return gr.update(choices=items, value=None)
 
 
-def handle_file_selection(selected_path):
-    """處理檔案選擇,如果是檔案則預覽,如果是資料夾則展開"""
+def handle_file_selection(selected_path, current_root_folder):
+    """處理檔案/資料夾選擇：
+    - 若為資料夾：切換展開/摺疊狀態，並回傳更新後的 choices（第三個輸出）
+    - 若為檔案：回傳檔案路徑與預覽內容，並不變更選單
+    返回值順序: preview_path_input_value, unified_preview_html, folder_tree_update
+    """
     if not selected_path:
-        return None, "<div style='padding:20px;text-align:center;color:#999;'>請選擇檔案進行預覽</div>"
-    
+        return None, "<div style='padding:20px;text-align:center;color:#999;'>請選擇檔案進行預覽</div>", gr.update()
+
     path_obj = Path(selected_path)
-    
-    # 如果是資料夾,回傳訊息
+
+    # 如果是資料夾,切換展開/摺疊
     if path_obj.is_dir():
-        return None, "<div style='padding:20px;text-align:center;color:#999;'>這是資料夾,請選擇檔案進行預覽</div>"
-    
+        if selected_path in EXPANDED_FOLDERS:
+            EXPANDED_FOLDERS.remove(selected_path)
+        else:
+            EXPANDED_FOLDERS.add(selected_path)
+
+        # 重新產生選單（使用目前的 root folder 路徑）
+        folder_update = load_folder_structure(current_root_folder)
+        # 不顯示預覽路徑，但顯示提示文字
+        return None, "<div style='padding:20px;text-align:center;color:#999;'>資料夾已切換展開/摺疊</div>", folder_update
+
     # 如果是檔案,填入路徑並預覽
     if path_obj.is_file():
         preview_html = preview_file(selected_path)
-        return selected_path, preview_html
-    
-    return None, "<div style='padding:20px;color:red;'>❌ 無效的路徑</div>"
+        # 保持選單原狀
+        return selected_path, preview_html, gr.update()
+
+    return None, "<div style='padding:20px;color:red;'>❌ 無效的路徑</div>", gr.update()
 
 
 def preview_uploaded_file(file):
@@ -262,7 +279,61 @@ def preview_file(file_path):
 with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     gr.Markdown("# 🔍 DeepSeek OCR 識別檢測")
     gr.Markdown("上傳 PDF 或圖片檔案，進行 OCR 文字識別")
-    
+
+    # 注入 CSS，使文件瀏覽的 Radio 選項垂直排列、每項佔一列，並修正文字與選取色彩對比
+    gr.HTML("""
+    <style>
+    /* 深色主題：標籤為深色背景、淺色文字 */
+    #folder_tree label {
+        display: block !important;
+        width: 100%;
+        padding: 8px 10px;
+        margin: 6px 0 !important;
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 6px;
+        cursor: pointer;
+        background: #1f2937 !important; /* 暗色背景 */
+        color: #f5f7fa !important; /* 淺色文字 */
+        user-select: text;
+    }
+
+    /* 確保內部所有文字元素都為淺色 */
+    #folder_tree label, #folder_tree label * {
+        color: #f5f7fa !important;
+    }
+
+    #folder_tree input[type="radio"] {
+        margin-right: 8px;
+        accent-color: #60a5fa;
+    }
+
+    /* 被勾選時加強對比（稍亮的深色） */
+    #folder_tree input[type="radio"]:checked + label,
+    #folder_tree label:has(input[type="radio"]:checked) {
+        background: #374151 !important;
+        color: #ffffff !important;
+        border-color: #60a5fa !important;
+    }
+
+    /* 選取文字時的樣式 */
+    #folder_tree label::selection {
+        background: #2563eb;
+        color: #ffffff;
+    }
+
+    /* hover 效果 */
+    #folder_tree label:hover {
+        box-shadow: 0 1px 6px rgba(0,0,0,0.5);
+        transform: translateY(-1px);
+    }
+
+    /* 小螢幕時保持適應 */
+    @media (max-width: 600px) {
+        #folder_tree label { font-size: 14px; padding: 10px; }
+    }
+    </style>
+    """)
+
     with gr.Row():
         with gr.Column(scale=1):
             gr.Markdown("### 📤 上傳文件")
@@ -302,11 +373,12 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
                 placeholder="輸入資料夾路徑..."
             )
             refresh_btn = gr.Button("🔄 重新整理")
-            folder_tree_output = gr.Dropdown(
-                label="檔案結構 (選擇檔案進行預覽)",
+            folder_tree_output = gr.Radio(
+                label="文件瀏覽",
                 choices=[],
                 interactive=True,
-                allow_custom_value=False
+                type="value",
+                elem_id="folder_tree"
             )
     
     with gr.Row():
@@ -351,11 +423,11 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         outputs=[folder_tree_output]
     )
     
-    # 當選擇檔案時,自動填入路徑並預覽
+    # 當選擇檔案或資料夾時,自動填入路徑並預覽/展開
     folder_tree_output.change(
         fn=handle_file_selection,
-        inputs=[folder_tree_output],
-        outputs=[preview_path_input, unified_preview]
+        inputs=[folder_tree_output, folder_path_input],
+        outputs=[preview_path_input, unified_preview, folder_tree_output]
     )
     
     preview_btn.click(
