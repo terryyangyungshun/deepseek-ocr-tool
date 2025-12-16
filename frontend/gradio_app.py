@@ -283,6 +283,14 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     # 注入 CSS，使文件瀏覽的 Radio 選項垂直排列、每項佔一列，並修正文字與選取色彩對比
     gr.HTML("""
     <style>
+    /* 容器限制：超過高度出現滾動 */
+    #folder_tree {
+        max-height: 420px; /* 可調整高度 */
+        overflow-y: auto;
+        padding: 6px;
+        border-radius: 6px;
+    }
+
     /* 深色主題：標籤為深色背景、淺色文字 */
     #folder_tree label {
         display: block !important;
@@ -327,9 +335,15 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         transform: translateY(-1px);
     }
 
+    /* 捲軸美化 (Webkit) */
+    #folder_tree::-webkit-scrollbar { width: 10px; }
+    #folder_tree::-webkit-scrollbar-track { background: transparent; }
+    #folder_tree::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 6px; }
+
     /* 小螢幕時保持適應 */
     @media (max-width: 600px) {
         #folder_tree label { font-size: 14px; padding: 10px; }
+        #folder_tree { max-height: 320px; }
     }
     </style>
     """)
