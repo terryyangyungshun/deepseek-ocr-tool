@@ -97,19 +97,19 @@ def preview_file_api(file_path):
 def process_ocr(file, prompt):
     """處理 OCR 任務的主函式"""
     if file is None:
-        return "❌ 請先上傳檔案", "", None, ""
+        return "❌ 請先上傳檔案", None
     
     upload_result = upload_file_to_api(file.name)
     
     if upload_result.get("status") != "success":
-        return f"❌ 上傳失敗: {upload_result.get('message')}", "", None, ""
+        return f"❌ 上傳失敗: {upload_result.get('message')}", None
     
     file_path = upload_result["file_path"]
     
     start_result = start_ocr_task_api(file_path, prompt)
     
     if start_result.get("status") != "running":
-        return f"❌ 任務啟動失敗: {start_result.get('message')}", "", None, ""
+        return f"❌ 任務啟動失敗: {start_result.get('message')}", None
     
     task_id = start_result["task_id"]
     
@@ -117,43 +117,68 @@ def process_ocr(file, prompt):
     completion_result = wait_for_task_completion(task_id)
     
     if completion_result.get("status") == "error":
-        return f"❌ 任務執行失敗: {completion_result.get('message', '未知錯誤')}", "", None, ""
+        return f"❌ 任務執行失敗: {completion_result.get('message', '未知錯誤')}", None
     
     # 取得結果檔案
     result = get_result_files_api(task_id)
     
     if result.get("status") != "success":
-        return f"❌ 取得結果失敗: {result.get('message')}", "", None, ""
+        return f"❌ 取得結果失敗: {result.get('message')}", None
     
     result_dir = result.get("result_dir", "")
-    files = result.get("files", [])
     
-    file_list = "\n".join([f"📄 {f}" for f in files]) if files else "無結果檔案"
-    
-    return f"✅ 任務完成！\n任務 ID: {task_id}", file_list, result_dir, ""
+    return f"✅ 任務完成！\n任務 ID: {task_id}\n結果目錄: {result_dir}", result_dir
 
 
 def load_folder_structure(folder_path):
-    """載入資料夾結構"""
+    """載入資料夾結構,返回可點擊的檔案列表"""
     if not folder_path or not Path(folder_path).exists():
-        return "❌ 資料夾路徑無效"
+        return gr.update(choices=[], value=None)
     
     result = get_folder_structure_api(folder_path)
     
     if result.get("status") != "success":
-        return f"❌ 載入失敗: {result.get('message')}"
+        return gr.update(choices=[], value=None)
     
-    def format_tree(items, indent=0):
-        lines = []
+    def collect_items(items, parent_path=""):
+        """收集所有檔案和資料夾的路徑"""
+        item_list = []
         for item in items:
-            prefix = "📁" if item["type"] == "folder" else "📄"
-            lines.append("  " * indent + f"{prefix} {item['name']}")
-            if item["type"] == "folder" and "children" in item:
-                lines.extend(format_tree(item["children"], indent + 1))
-        return lines
+            if item["type"] == "folder":
+                # 資料夾顯示為 📁 開頭
+                display_name = f"📁 {item['name']}"
+                item_list.append((display_name, item['path']))
+                # 遞迴加入子項目
+                if 'children' in item:
+                    item_list.extend(collect_items(item['children'], item['path']))
+            else:
+                # 檔案顯示為 📄 開頭
+                display_name = f"📄 {item['name']}"
+                item_list.append((display_name, item['path']))
+        return item_list
     
-    tree = format_tree(result.get("children", []))
-    return "\n".join(tree) if tree else "空資料夾"
+    items = collect_items(result.get("children", []))
+    
+    return gr.update(choices=items, value=None)
+
+
+def handle_file_selection(selected_path):
+    """處理檔案選擇,如果是檔案則預覽,如果是資料夾則展開"""
+    if not selected_path:
+        return None, "<div style='padding:20px;text-align:center;color:#999;'>請選擇檔案進行預覽</div>"
+    
+    path_obj = Path(selected_path)
+    
+    # 如果是資料夾,回傳訊息
+    if path_obj.is_dir():
+        return None, "<div style='padding:20px;text-align:center;color:#999;'>這是資料夾,請選擇檔案進行預覽</div>"
+    
+    # 如果是檔案,填入路徑並預覽
+    if path_obj.is_file():
+        preview_html = preview_file(selected_path)
+        return selected_path, preview_html
+    
+    return None, "<div style='padding:20px;color:red;'>❌ 無效的路徑</div>"
 
 
 def preview_uploaded_file(file):
@@ -270,19 +295,19 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
             status_output = gr.Textbox(label="執行狀態", lines=3)
         
         with gr.Column(scale=1):
-            gr.Markdown("### 📂 文件瀏覽器")
+            gr.Markdown("### 📂 檔案瀏覽器")
             folder_path_input = gr.Textbox(
-                label="結果資料夾路徑",
+                label="瀏覽資料夾路徑",
                 value=str(RESULTS_DIR),
                 placeholder="輸入資料夾路徑..."
             )
             refresh_btn = gr.Button("🔄 重新整理")
-            folder_tree_output = gr.Textbox(
-                label="資料夾結構",
-                lines=15,
-                interactive=False
+            folder_tree_output = gr.Dropdown(
+                label="檔案結構 (選擇檔案進行預覽)",
+                choices=[],
+                interactive=True,
+                allow_custom_value=False
             )
-            files_output = gr.Textbox(label="任務結果檔案", lines=5)
     
     with gr.Row():
         gr.Markdown("### 👁️ 檔案預覽")
@@ -313,7 +338,7 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     submit_btn.click(
         fn=process_ocr,
         inputs=[file_input, prompt_input],
-        outputs=[status_output, files_output, folder_path_input, folder_tree_output]
+        outputs=[status_output, folder_path_input]
     ).then(
         fn=load_folder_structure,
         inputs=[folder_path_input],
@@ -324,6 +349,13 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
         fn=load_folder_structure,
         inputs=[folder_path_input],
         outputs=[folder_tree_output]
+    )
+    
+    # 當選擇檔案時,自動填入路徑並預覽
+    folder_tree_output.change(
+        fn=handle_file_selection,
+        inputs=[folder_tree_output],
+        outputs=[preview_path_input, unified_preview]
     )
     
     preview_btn.click(
