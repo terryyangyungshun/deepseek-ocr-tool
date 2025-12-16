@@ -362,10 +362,10 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
             )
             submit_btn = gr.Button("🚀 開始解析", variant="primary")
             
+        with gr.Column(scale=1):
             gr.Markdown("### 📊 任務狀態")
             status_output = gr.Textbox(label="執行狀態", lines=3)
-        
-        with gr.Column(scale=1):
+
             gr.Markdown("### 📂 檔案瀏覽器")
             folder_path_input = gr.Textbox(
                 label="瀏覽資料夾路徑",
