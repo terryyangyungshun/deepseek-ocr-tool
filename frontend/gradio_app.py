@@ -14,13 +14,9 @@ sys.path.insert(0, str(BACKEND_DIR))
 import gradio as gr
 import requests
 import time
-import asyncio
-import websockets
-import json
 from config_loader import RESULTS_DIR
 
 API_BASE_URL = "http://localhost:8002"
-WS_BASE_URL = "ws://localhost:8002"
 
 
 def upload_file_to_api(file_path):
@@ -44,38 +40,28 @@ def start_ocr_task_api(file_path, prompt):
         return {"status": "error", "message": str(e)}
 
 
-async def monitor_progress_via_websocket(task_id, progress_callback):
-    """透過 WebSocket 監聽任務進度"""
-    try:
-        uri = f"{WS_BASE_URL}/ws/progress/{task_id}"
-        async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
-            while True:
-                try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=60)
-                    data = json.loads(message)
-                    
-                    # 如果收到進度更新
-                    if "progress" in data:
-                        progress_callback(data["progress"])
-                    
-                    # 如果收到完成訊息
-                    if data.get("status") == "finished" or data.get("status") == "error":
-                        return data
-                except asyncio.TimeoutError:
-                    # 發送 ping 保持連線
-                    await websocket.send("ping")
-    except Exception as e:
-        print(f"❌ WebSocket 錯誤: {e}")
-        return None
-
-
-def get_task_progress_api(task_id):
-    """查詢任務進度（備用方案）"""
-    try:
-        response = requests.get(f"{API_BASE_URL}/api/progress/{task_id}", timeout=10)
-        return response.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+def wait_for_task_completion(task_id, max_wait_seconds=600):
+    """輪詢等待任務完成"""
+    max_retries = max_wait_seconds
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        time.sleep(1)
+        retry_count += 1
+        
+        try:
+            response = requests.get(f"{API_BASE_URL}/api/result/{task_id}", timeout=10)
+            result = response.json()
+            
+            if result.get("status") == "success" and result.get("state") == "finished":
+                return {"status": "finished", "result": result}
+            elif result.get("status") == "error":
+                return {"status": "error", "message": result.get("message", "未知錯誤")}
+        except Exception as e:
+            if retry_count >= 3:  # 前 3 次重試不回報錯誤
+                print(f"⚠️ 輪詢錯誤 (第 {retry_count} 次): {e}")
+    
+    return {"status": "error", "message": "任務執行逾時"}
 
 
 def get_result_files_api(task_id):
@@ -108,12 +94,11 @@ def preview_file_api(file_path):
         return f"錯誤: {str(e)}"
 
 
-def process_ocr(file, prompt, progress=gr.Progress()):
+def process_ocr(file, prompt):
     """處理 OCR 任務的主函式"""
     if file is None:
         return "❌ 請先上傳檔案", "", None, ""
     
-    progress(0, desc="📤 上傳檔案中...")
     upload_result = upload_file_to_api(file.name)
     
     if upload_result.get("status") != "success":
@@ -121,7 +106,6 @@ def process_ocr(file, prompt, progress=gr.Progress()):
     
     file_path = upload_result["file_path"]
     
-    progress(0.1, desc="🚀 啟動 OCR 任務...")
     start_result = start_ocr_task_api(file_path, prompt)
     
     if start_result.get("status") != "running":
@@ -129,60 +113,13 @@ def process_ocr(file, prompt, progress=gr.Progress()):
     
     task_id = start_result["task_id"]
     
-    # 定義進度回調函式
-    last_progress = [0]  # 使用列表來保存可變值
-    def update_progress(percent):
-        if percent > last_progress[0]:  # 只更新增加的進度
-            last_progress[0] = percent
-            progress(percent / 100, desc=f"⚙️ 處理中... {percent}%")
+    # 輪詢等待任務完成
+    completion_result = wait_for_task_completion(task_id)
     
-    # 嘗試使用 WebSocket 監聽進度
-    use_polling = False
-    try:
-        result = asyncio.run(monitor_progress_via_websocket(task_id, update_progress))
-        
-        # 如果 WebSocket 成功且收到完成訊息
-        if result and result.get("status") == "finished":
-            pass  # 繼續處理結果
-        elif result and result.get("status") == "error":
-            return f"❌ 任務執行失敗: {result.get('message', '未知錯誤')}", "", None, ""
-        else:
-            # WebSocket 失敗，回退到輪詢方式
-            use_polling = True
-    except Exception as e:
-        print(f"⚠️ 使用輪詢方式: {e}")
-        use_polling = True
-    
-    # 輪詢任務進度（備用方案）
-    if use_polling:
-        max_retries = 300  # 最多等待 5 分鐘
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            time.sleep(1)
-            retry_count += 1
-            
-            progress_result = get_task_progress_api(task_id)
-            
-            if progress_result.get("status") != "success":
-                if retry_count < 3:  # 前 3 次重試
-                    continue
-                return f"❌ 查詢進度失敗: {progress_result.get('message')}", "", None, ""
-            
-            state = progress_result.get("state", "unknown")
-            current_progress = int(progress_result.get("progress", 0))
-            
-            if current_progress > last_progress[0]:
-                last_progress[0] = current_progress
-                progress(current_progress / 100, desc=f"⚙️ 處理中... {current_progress}%")
-            
-            if state == "finished":
-                break
-            elif state == "error":
-                return f"❌ 任務執行失敗", "", None, ""
+    if completion_result.get("status") == "error":
+        return f"❌ 任務執行失敗: {completion_result.get('message', '未知錯誤')}", "", None, ""
     
     # 取得結果檔案
-    progress(0.95, desc="📥 取得結果...")
     result = get_result_files_api(task_id)
     
     if result.get("status") != "success":
@@ -193,7 +130,6 @@ def process_ocr(file, prompt, progress=gr.Progress()):
     
     file_list = "\n".join([f"📄 {f}" for f in files]) if files else "無結果檔案"
     
-    progress(1.0, desc="✅ 完成！")
     return f"✅ 任務完成！\n任務 ID: {task_id}", file_list, result_dir, ""
 
 
@@ -406,6 +342,6 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
 if __name__ == "__main__":
     demo.launch(
         server_name="localhost",
-        server_port=7860,
+        server_port=7861,
         share=False
     )

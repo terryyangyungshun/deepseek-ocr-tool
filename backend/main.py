@@ -7,13 +7,12 @@ DeepSeek OCR FastAPI 後端入口
 import uuid
 import asyncio
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi import Query
 from typing import Optional
-import json
 
 from file_manager import save_uploaded_file
 from inference_runner import run_ocr_task, read_task_state
@@ -28,19 +27,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-active_connections = {}
-
-
-async def send_progress(websocket: WebSocket, task_id: str, percent: int):
-    """WebSocket 即時進度"""
-    try:
-        await websocket.send_json({"task_id": task_id, "progress": percent})
-    except Exception as e:
-        print(f"❌ WebSocket 發送失敗: {e}")
-        # 移除無效連線
-        if task_id in active_connections:
-            del active_connections[task_id]
 
 
 @app.get("/api/folder")
@@ -99,57 +85,17 @@ async def start_ocr_task(payload: dict, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())[:8]
 
     async def background_task():
-        def on_progress(p):
-            if task_id in active_connections:
-                ws = active_connections[task_id]
-                try:
-                    # 使用 asyncio 在事件循環中發送
-                    loop = asyncio.get_event_loop()
-                    loop.create_task(send_progress(ws, task_id, p))
-                except Exception as e:
-                    print(f"❌ 進度發送錯誤: {e}")
-
         # 在背景執行 OCR 任務
-        result = await asyncio.to_thread(
+        await asyncio.to_thread(
             run_ocr_task, 
             input_path=file_path, 
             task_id=task_id, 
-            on_progress=on_progress, 
+            on_progress=None, 
             prompt=prompt
         )
 
-        # 發送完成訊息
-        if task_id in active_connections:
-            ws = active_connections[task_id]
-            try:
-                await ws.send_json(result)
-            except Exception as e:
-                print(f"❌ 完成訊息發送失敗: {e}")
-
     background_tasks.add_task(background_task)
     return {"status": "running", "task_id": task_id}
-
-
-@app.websocket("/ws/progress/{task_id}")
-async def websocket_progress(websocket: WebSocket, task_id: str):
-    """WebSocket 進度推播"""
-    await websocket.accept()
-    active_connections[task_id] = websocket
-    print(f"🌐 WebSocket 已連線: {task_id}")
-    try:
-        while True:
-            # 保持連線活躍
-            data = await websocket.receive_text()
-            # 如果收到 ping，回應 pong
-            if data == "ping":
-                await websocket.send_text("pong")
-    except WebSocketDisconnect:
-        print(f"❌ WebSocket 正常斷線: {task_id}")
-    except Exception as e:
-        print(f"❌ WebSocket 異常: {task_id} - {e}")
-    finally:
-        if task_id in active_connections:
-            del active_connections[task_id]
 
 
 @app.get("/api/result/{task_id}")
