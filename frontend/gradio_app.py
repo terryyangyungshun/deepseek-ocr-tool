@@ -285,10 +285,35 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     <style>
     /* 容器限制：超過高度出現滾動 */
     #folder_tree {
-        max-height: 420px; /* 可調整高度 */
+        max-height: 300px; /* 調整為 300px */
         overflow-y: auto;
         padding: 6px;
         border-radius: 6px;
+        margin-top: 8px;
+    }
+
+    /* 使上方 row 的左右欄等高，並可將左欄按鈕推到底部 */
+    /* 更可靠的選取器：直接針對 top_row 本身與其第一層子元素 */
+    #top_row {
+        display: flex !important;
+        gap: 20px;
+        align-items: stretch;
+        min-height: 480px; /* 確保左右欄有一致高度 */
+    }
+    #top_row > div {
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 1 0 !important;
+    }
+
+    /* 將開始解析按鈕推到左欄底部 */
+    #start_btn {
+        margin-top: auto !important;
+    }
+
+    /* 將文件瀏覽區推到右欄底部，使兩側底端對齊 */
+    #folder_tree {
+        margin-top: auto !important;
     }
 
     /* 深色主題：標籤為深色背景、淺色文字 */
@@ -343,13 +368,14 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
     /* 小螢幕時保持適應 */
     @media (max-width: 600px) {
         #folder_tree label { font-size: 14px; padding: 10px; }
-        #folder_tree { max-height: 320px; }
+        #folder_tree { max-height: 260px; }
+        #top_row { min-height: 360px; }
     }
     </style>
     """)
 
-    with gr.Row():
-        with gr.Column(scale=1):
+    with gr.Row(elem_id="top_row"):
+        with gr.Column(scale=1, elem_id="left_col"):
             gr.Markdown("### 📤 上傳文件")
             file_input = gr.File(
                 label="上傳文件 (PDF / PNG / JPG)",
@@ -374,9 +400,9 @@ with gr.Blocks(title="DeepSeek OCR 識別檢測") as demo:
                 value="<image>\n<|grounding|>Convert the document to markdown.",
                 interactive=True
             )
-            submit_btn = gr.Button("🚀 開始解析", variant="primary")
+            submit_btn = gr.Button("🚀 開始解析", variant="primary", elem_id="start_btn")
             
-        with gr.Column(scale=1):
+        with gr.Column(scale=1, elem_id="right_col"):
             gr.Markdown("### 📊 任務狀態")
             status_output = gr.Textbox(label="執行狀態", lines=3)
 
