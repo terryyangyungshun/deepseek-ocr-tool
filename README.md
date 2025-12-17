@@ -74,29 +74,30 @@ DeepSeek-OCR/
 - **PyTorch**：需安裝與 CUDA 相符的預編譯版本
 
 ## 快速開始
+### 1. 下載 vllm-0.8.5 [whl](https://github.com/vllm-project/vllm/releases/tag/v0.8.5) 並放置 packages 資料夾底下
 
-### 1. 環境配置
+### 2. 環境配置
 
 執行以下命令完成環境配置：
    ```bash
    bash install.sh
    ```
 
-### 2. 啟動後端服務
+### 3. 啟動後端服務
 
 執行以下命令啟動 FastAPI 後端：
 ```bash
 python backend/main.py
 ```
 
-### 3. 啟動前端介面
+### 4. 啟動前端介面
 
 執行以下命令啟動 Gradio 前端：
 ```bash
 python frontend/gradio_app.py
 ```
 
-### 4. 使用
+### 5. 使用
 
 - 打開瀏覽器，連線到 http://localhost:7861。
 - 上傳 PDF 或圖片文件，選擇提示詞，點擊「開始解析」。
