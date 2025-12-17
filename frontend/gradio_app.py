@@ -6,7 +6,7 @@ DeepSeek OCR Gradio 前端介面
 
 import sys
 from pathlib import Path
-
+import markdown 
 # 將 backend 目錄加入 Python 搜尋路徑
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
@@ -239,7 +239,24 @@ def preview_file(file_path):
         return "<div style='padding:20px;color:red;'>❌ 檔案路徑無效</div>"
     
     file_path_obj = Path(file_path)
-    
+
+    # .mmd、.md、.markdown 檔案：以 markdown 呈現
+    if file_path_obj.suffix.lower() in [".mmd", ".md", ".markdown"]:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 嘗試判斷是否為 markdown 表格或 markdown 內容
+            html = markdown.markdown(content, extensions=['tables'])
+            # 加上簡單樣式讓表格更好看
+            style = """
+            <style>
+            table { border-collapse: collapse; margin: 10px 0; }
+            th, td { border: 1px solid #bbb; padding: 6px 12px; }
+            </style>
+            """
+            return style + html
+        except Exception as e:
+            return f"<div style='padding:20px;color:red;'>❌ 檔案讀取失敗: {str(e)}</div>"
     # 如果是圖片，轉為 base64 內嵌
     if file_path_obj.suffix.lower() in [".png", ".jpg", ".jpeg"]:
         import base64
