@@ -99,7 +99,7 @@ python frontend/gradio_app.py
 
 ### 5. 使用
 
-- 打開瀏覽器，連線到 http://localhost:7861。
+- 打開瀏覽器，連線到 http://localhost:7861
 - 上傳 PDF 或圖片文件，選擇提示詞，點擊「開始解析」。
 
 ---
